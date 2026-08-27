@@ -381,7 +381,7 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 with st.expander("Format de fichier attendu"):
-    st.write("Colonnes requises :")
+    st.write("Colonnes requises (CSV ou Excel — .csv, .xlsx, .xls) :")
     st.code(", ".join(features_cat + features_num))
     example = pd.DataFrame({
         "type_machine": ["M", "L", "H"],
@@ -392,12 +392,28 @@ with st.expander("Format de fichier attendu"):
         "usure_outil_min": [95, 40, 215],
     })
     st.dataframe(example, width="stretch")
-    st.download_button(
-        "Télécharger un exemple CSV",
-        example.to_csv(index=False).encode("utf-8"),
-        file_name="exemple_relevés.csv",
-        mime="text/csv",
-    )
+
+    import io
+    excel_buffer = io.BytesIO()
+    example.to_excel(excel_buffer, index=False, engine="openpyxl")
+
+    col_csv, col_xlsx = st.columns(2)
+    with col_csv:
+        st.download_button(
+            "Télécharger un exemple CSV",
+            example.to_csv(index=False).encode("utf-8"),
+            file_name="exemple_relevés.csv",
+            mime="text/csv",
+            width="stretch",
+        )
+    with col_xlsx:
+        st.download_button(
+            "Télécharger un exemple Excel",
+            excel_buffer.getvalue(),
+            file_name="exemple_relevés.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            width="stretch",
+        )
 
 # Alias de colonnes reconnus automatiquement — permet d'accepter directement
 # le fichier brut Kaggle (AI4I 2020) sans passer par adapt_real_dataset.py,
@@ -432,10 +448,13 @@ def normalize_columns(df):
     return df.rename(columns=rename_map)
 
 
-uploaded = st.file_uploader("Fichier CSV de relevés", type=["csv"])
+uploaded = st.file_uploader("Fichier de relevés (CSV ou Excel)", type=["csv", "xlsx", "xls"])
 
 if uploaded is not None:
-    df = pd.read_csv(uploaded)
+    if uploaded.name.lower().endswith((".xlsx", ".xls")):
+        df = pd.read_excel(uploaded)
+    else:
+        df = pd.read_csv(uploaded)
     df = normalize_columns(df)
     missing = set(features_num + features_cat) - set(df.columns)
     if missing:
