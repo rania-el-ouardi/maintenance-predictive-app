@@ -11,7 +11,7 @@ sous Power BI, +8 points de disponibilité, ROI < 3 mois). Il combine une
 brique prédictive (Machine Learning) avec une lecture inspirée des outils
 Lean Six Sigma utilisés sur le terrain — AMDEC, Pareto, Ishikawa.
 
-**Démo en ligne :** [lien Streamlit Cloud à ajouter après déploiement]
+**Démo en ligne :** [rania-maintenance-predictive.streamlit.app](https://rania-maintenance-predictive.streamlit.app)
 
 ## Identité visuelle
 
@@ -20,10 +20,6 @@ Palette et typographie inspirées des salles de supervision industrielle
 monospace — pas un thème de tableau de bord générique. Chaque machine
 analysée s'affiche comme une carte-instrument avec une jauge de risque à
 trois zones (faible / modéré / critique) plutôt qu'un simple tableau.
-
-## Aperçu
-
-![capture d'écran à ajouter](docs/screenshot.png)
 
 ## Fonctionnement
 
@@ -105,5 +101,5 @@ Le reste du pipeline (`app.py`) n'a besoin d'aucune modification.
   SIL Open Font License.
 
 ---
-Projet réalisé par **Rania El Ouardi** — élève-ingénieure, Génie Industriel,
+Projet réalisé par **Rania El OUARDI** — élève-ingénieure, Génie Industriel,
 Excellence Opérationnelle & Smart Manufacturing, ESITH Casablanca.
