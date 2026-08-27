@@ -13,9 +13,16 @@ Lancer en local :
 """
 
 import joblib
+import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import roc_auc_score
 
 # ---------------------------------------------------------------------------
 # Design tokens — source unique pour la palette (réutilisée dans le CSS
@@ -31,6 +38,59 @@ AMBRE   = "#C4790E"   # risque modéré
 CORAIL  = "#C6402F"   # risque élevé
 
 MODEL_PATH = "models/model.pkl"
+
+
+def _build_example_datasets():
+    """Trois jeux de données d'exemple, dans des domaines volontairement
+    différents, pour démontrer concrètement que le mode générique ne se
+    limite pas à l'industrie lourde."""
+    rng = np.random.default_rng(7)
+
+    n = 180
+    auto = pd.DataFrame({
+        "type_vehicule": rng.choice(["Citadine", "Berline", "SUV"], n, p=[0.4, 0.35, 0.25]),
+        "kilometrage_km": rng.normal(80000, 40000, n).clip(0).round(0),
+        "age_vehicule_ans": rng.normal(6, 3, n).clip(0).round(1),
+        "temperature_moteur_C": rng.normal(90, 8, n).round(1),
+    })
+    score = 0.00002 * auto["kilometrage_km"] + 0.15 * auto["age_vehicule_ans"] + 0.08 * (auto["temperature_moteur_C"] - 95).clip(lower=0)
+    p = 1 / (1 + np.exp(-(score - 2.3)))
+    auto["panne"] = np.where(rng.random(n) < p, "Oui", "Non")
+
+    rng2 = np.random.default_rng(11)
+    n = 180
+    agro = pd.DataFrame({
+        "ligne_production": rng2.choice(["A", "B", "C"], n),
+        "temperature_stockage_C": rng2.normal(4, 2.5, n).round(1),
+        "humidite_pct": rng2.normal(60, 12, n).round(1),
+        "duree_transport_h": rng2.normal(12, 6, n).clip(0).round(1),
+        "ph": rng2.normal(6.5, 0.6, n).round(2),
+    })
+    temp_bad = agro["temperature_stockage_C"] > 7
+    transport_bad = agro["duree_transport_h"] > 18
+    ph_bad = (agro["ph"] - 6.5).abs() > 0.7
+    score = temp_bad.astype(float) * 2.5 + transport_bad.astype(float) * 2.2 + ph_bad.astype(float) * 2.0 + rng2.normal(0, 0.25, n)
+    p = 1 / (1 + np.exp(-(score - 1.5)))
+    agro["defaut_qualite"] = np.where(rng2.random(n) < p, "Defaut", "OK")
+
+    rng3 = np.random.default_rng(3)
+    n = 160
+    cosm = pd.DataFrame({
+        "type_produit": rng3.choice(["Creme", "Serum", "Lotion"], n),
+        "ph": rng3.normal(5.5, 0.9, n).round(2),
+        "viscosite_cp": rng3.normal(3000, 1000, n).clip(0).round(0),
+        "duree_stockage_mois": rng3.normal(8, 5, n).clip(0).round(1),
+    })
+    ph_bad2 = (cosm["ph"] < 5.0) | (cosm["ph"] > 6.0)
+    store_bad = cosm["duree_stockage_mois"] > 11
+    score = ph_bad2.astype(float) * 2.0 + store_bad.astype(float) * 1.8 + rng3.normal(0, 0.4, n)
+    p = 1 / (1 + np.exp(-(score - 1.2)))
+    cosm["conformite"] = np.where(rng3.random(n) < p, "NonConforme", "Conforme")
+
+    return auto, agro, cosm
+
+
+EXAMPLE_AUTOMOBILE, EXAMPLE_AGROALIMENTAIRE, EXAMPLE_COSMETIQUE = _build_example_datasets()
 
 ISHIKAWA_MAP = {
     "temperature_air_K": "Milieu (environnement thermique)",
@@ -380,136 +440,406 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-with st.expander("Format de fichier attendu"):
-    st.write("Colonnes requises (CSV ou Excel — .csv, .xlsx, .xls) :")
-    st.code(", ".join(features_cat + features_num))
-    example = pd.DataFrame({
-        "type_machine": ["M", "L", "H"],
-        "temperature_air_K": [300.5, 298.9, 302.1],
-        "temperature_process_K": [310.2, 308.5, 314.8],
-        "vitesse_rotation_rpm": [1520, 1410, 2350],
-        "couple_Nm": [42.1, 38.7, 61.2],
-        "usure_outil_min": [95, 40, 215],
-    })
-    st.dataframe(example, width="stretch")
+mode = st.radio(
+    "Mode",
+    ["🏭 Modèle Industrie — pré-entraîné (SMI / AI4I 2020)", "🗂️ Mode générique — entraîner sur mes propres données"],
+    label_visibility="collapsed",
+    horizontal=True,
+)
 
-    import io
-    excel_buffer = io.BytesIO()
-    example.to_excel(excel_buffer, index=False, engine="openpyxl")
+st.divider()
 
-    col_csv, col_xlsx = st.columns(2)
-    with col_csv:
-        st.download_button(
-            "Télécharger un exemple CSV",
-            example.to_csv(index=False).encode("utf-8"),
-            file_name="exemple_relevés.csv",
-            mime="text/csv",
-            width="stretch",
-        )
-    with col_xlsx:
-        st.download_button(
-            "Télécharger un exemple Excel",
-            excel_buffer.getvalue(),
-            file_name="exemple_relevés.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            width="stretch",
-        )
+if mode.startswith("🏭"):
 
-# Alias de colonnes reconnus automatiquement — permet d'accepter directement
-# le fichier brut Kaggle (AI4I 2020) sans passer par adapt_real_dataset.py,
-# en plus du format "natif" du projet.
-COLUMN_ALIASES = {
-    "type": "type_machine",
-    "Type": "type_machine",
-    "air temperature [k]": "temperature_air_K",
-    "Air temperature [K]": "temperature_air_K",
-    "process temperature [k]": "temperature_process_K",
-    "Process temperature [K]": "temperature_process_K",
-    "rotational speed [rpm]": "vitesse_rotation_rpm",
-    "Rotational speed [rpm]": "vitesse_rotation_rpm",
-    "torque [nm]": "couple_Nm",
-    "Torque [Nm]": "couple_Nm",
-    "tool wear [min]": "usure_outil_min",
-    "Tool wear [min]": "usure_outil_min",
-}
+    with st.expander("Format de fichier attendu"):
+        st.write("Colonnes requises (CSV ou Excel — .csv, .xlsx, .xls) :")
+        st.code(", ".join(features_cat + features_num))
+        example = pd.DataFrame({
+            "type_machine": ["M", "L", "H"],
+            "temperature_air_K": [300.5, 298.9, 302.1],
+            "temperature_process_K": [310.2, 308.5, 314.8],
+            "vitesse_rotation_rpm": [1520, 1410, 2350],
+            "couple_Nm": [42.1, 38.7, 61.2],
+            "usure_outil_min": [95, 40, 215],
+        })
+        st.dataframe(example, width="stretch")
 
+        import io
+        excel_buffer = io.BytesIO()
+        example.to_excel(excel_buffer, index=False, engine="openpyxl")
 
-def normalize_columns(df):
-    """Reconnaît automatiquement plusieurs formats de colonnes courants
-    (natif du projet, ou fichier brut Kaggle AI4I 2020) et les convertit
-    vers le format interne attendu par le modèle."""
-    rename_map = {}
-    for col in df.columns:
-        key = col.strip()
-        if key in COLUMN_ALIASES:
-            rename_map[col] = COLUMN_ALIASES[key]
-        elif key.lower() in COLUMN_ALIASES:
-            rename_map[col] = COLUMN_ALIASES[key.lower()]
-    return df.rename(columns=rename_map)
-
-
-uploaded = st.file_uploader("Fichier de relevés (CSV ou Excel)", type=["csv", "xlsx", "xls"])
-
-if uploaded is not None:
-    if uploaded.name.lower().endswith((".xlsx", ".xls")):
-        df = pd.read_excel(uploaded)
-    else:
-        df = pd.read_csv(uploaded)
-    df = normalize_columns(df)
-    missing = set(features_num + features_cat) - set(df.columns)
-    if missing:
-        st.error(
-            f"Colonnes manquantes ou non reconnues : {', '.join(sorted(missing))}. "
-            "Utilisez l'exemple ci-dessus, ou le dataset AI4I 2020 (brut ou converti)."
-        )
-    else:
-        proba = model.predict_proba(df[features_num + features_cat])[:, 1]
-
-        n_high = int((proba >= 0.70).sum())
-        n_mid = int(((proba >= 0.30) & (proba < 0.70)).sum())
-        n_low = int((proba < 0.30).sum())
-
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Risque élevé", n_high)
-        c2.metric("Risque modéré", n_mid)
-        c3.metric("Risque faible", n_low)
-
-        order = proba.argsort()[::-1]
-
-        MAX_CARDS = 25
-        n_shown = min(MAX_CARDS, len(order))
-        header_label = "Machines — triées par risque décroissant"
-        if len(order) > MAX_CARDS:
-            header_label += f" (top {n_shown} sur {len(order)} — voir le tableau brut pour le parc complet)"
-        st.markdown(f'<div class="mp-panel-header">{header_label}</div>', unsafe_allow_html=True)
-
-        for i in order[:MAX_CARDS]:
-            row = df.iloc[i].to_dict()
-            st.markdown(render_gauge_card(row, proba[i]), unsafe_allow_html=True)
-
-        with st.expander(f"Voir le tableau brut ({len(order)} machines)"):
-            df_out = df.copy()
-            df_out["probabilité_panne"] = (proba * 100).round(1)
-            df_out["niveau_risque"] = [risk_zone(p)[1] for p in proba]
-            st.dataframe(df_out.iloc[order], width="stretch")
+        col_csv, col_xlsx = st.columns(2)
+        with col_csv:
             st.download_button(
-                "Télécharger les résultats (CSV)",
-                df_out.to_csv(index=False).encode("utf-8"),
-                file_name="resultats_maintenance_predictive.csv",
+                "Télécharger un exemple CSV",
+                example.to_csv(index=False).encode("utf-8"),
+                file_name="exemple_relevés.csv",
                 mime="text/csv",
+                width="stretch",
+            )
+        with col_xlsx:
+            st.download_button(
+                "Télécharger un exemple Excel",
+                excel_buffer.getvalue(),
+                file_name="exemple_relevés.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                width="stretch",
             )
 
-        st.markdown('<div class="mp-panel-header">Analyse</div>', unsafe_allow_html=True)
-        col_a, col_b = st.columns(2)
-        with col_a:
-            st.caption("Quels facteurs pèsent le plus dans les décisions du modèle.")
-            st.pyplot(plot_feature_importance(model))
-        with col_b:
-            st.caption("Sur les machines à risque, quelles causes dominent (règle 80/20).")
-            pareto_fig = plot_pareto_causes(df, proba)
-            if pareto_fig is not None:
-                st.pyplot(pareto_fig)
-            else:
-                st.info("Aucune machine à risque dans ce fichier.")
+    # Alias de colonnes reconnus automatiquement — permet d'accepter directement
+    # le fichier brut Kaggle (AI4I 2020) sans passer par adapt_real_dataset.py,
+    # en plus du format "natif" du projet.
+    COLUMN_ALIASES = {
+        "type": "type_machine",
+        "Type": "type_machine",
+        "air temperature [k]": "temperature_air_K",
+        "Air temperature [K]": "temperature_air_K",
+        "process temperature [k]": "temperature_process_K",
+        "Process temperature [K]": "temperature_process_K",
+        "rotational speed [rpm]": "vitesse_rotation_rpm",
+        "Rotational speed [rpm]": "vitesse_rotation_rpm",
+        "torque [nm]": "couple_Nm",
+        "Torque [Nm]": "couple_Nm",
+        "tool wear [min]": "usure_outil_min",
+        "Tool wear [min]": "usure_outil_min",
+    }
+
+
+    def normalize_columns(df):
+        """Reconnaît automatiquement plusieurs formats de colonnes courants
+        (natif du projet, ou fichier brut Kaggle AI4I 2020) et les convertit
+        vers le format interne attendu par le modèle."""
+        rename_map = {}
+        for col in df.columns:
+            key = col.strip()
+            if key in COLUMN_ALIASES:
+                rename_map[col] = COLUMN_ALIASES[key]
+            elif key.lower() in COLUMN_ALIASES:
+                rename_map[col] = COLUMN_ALIASES[key.lower()]
+        return df.rename(columns=rename_map)
+
+
+    uploaded = st.file_uploader("Fichier de relevés (CSV ou Excel)", type=["csv", "xlsx", "xls"])
+
+    if uploaded is not None:
+        if uploaded.name.lower().endswith((".xlsx", ".xls")):
+            df = pd.read_excel(uploaded)
+        else:
+            df = pd.read_csv(uploaded)
+        df = normalize_columns(df)
+        missing = set(features_num + features_cat) - set(df.columns)
+        if missing:
+            st.error(
+                f"Colonnes manquantes ou non reconnues : {', '.join(sorted(missing))}. "
+                "Utilisez l'exemple ci-dessus, ou le dataset AI4I 2020 (brut ou converti)."
+            )
+        else:
+            proba = model.predict_proba(df[features_num + features_cat])[:, 1]
+
+            n_high = int((proba >= 0.70).sum())
+            n_mid = int(((proba >= 0.30) & (proba < 0.70)).sum())
+            n_low = int((proba < 0.30).sum())
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Risque élevé", n_high)
+            c2.metric("Risque modéré", n_mid)
+            c3.metric("Risque faible", n_low)
+
+            order = proba.argsort()[::-1]
+
+            MAX_CARDS = 25
+            n_shown = min(MAX_CARDS, len(order))
+            header_label = "Machines — triées par risque décroissant"
+            if len(order) > MAX_CARDS:
+                header_label += f" (top {n_shown} sur {len(order)} — voir le tableau brut pour le parc complet)"
+            st.markdown(f'<div class="mp-panel-header">{header_label}</div>', unsafe_allow_html=True)
+
+            for i in order[:MAX_CARDS]:
+                row = df.iloc[i].to_dict()
+                st.markdown(render_gauge_card(row, proba[i]), unsafe_allow_html=True)
+
+            with st.expander(f"Voir le tableau brut ({len(order)} machines)"):
+                df_out = df.copy()
+                df_out["probabilité_panne"] = (proba * 100).round(1)
+                df_out["niveau_risque"] = [risk_zone(p)[1] for p in proba]
+                st.dataframe(df_out.iloc[order], width="stretch")
+                st.download_button(
+                    "Télécharger les résultats (CSV)",
+                    df_out.to_csv(index=False).encode("utf-8"),
+                    file_name="resultats_maintenance_predictive.csv",
+                    mime="text/csv",
+                )
+
+            st.markdown('<div class="mp-panel-header">Analyse</div>', unsafe_allow_html=True)
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.caption("Quels facteurs pèsent le plus dans les décisions du modèle.")
+                st.pyplot(plot_feature_importance(model))
+            with col_b:
+                st.caption("Sur les machines à risque, quelles causes dominent (règle 80/20).")
+                pareto_fig = plot_pareto_causes(df, proba)
+                if pareto_fig is not None:
+                    st.pyplot(pareto_fig)
+                else:
+                    st.info("Aucune machine à risque dans ce fichier.")
+    else:
+        st.info("En attente d'un fichier CSV — utilisez l'exemple ci-dessus pour tester l'outil.")
+
 else:
-    st.info("En attente d'un fichier CSV — utilisez l'exemple ci-dessus pour tester l'outil.")
+    # -----------------------------------------------------------------------
+    # Mode générique — entraîne un nouveau modèle à la volée sur le fichier
+    # déposé, quel que soit le domaine (industrie, agroalimentaire,
+    # automobile, cosmétique...), tant qu'il y a une colonne "résultat"
+    # binaire et des colonnes de mesures.
+    # -----------------------------------------------------------------------
+    st.markdown(
+        "Dépose un fichier avec une colonne indiquant un problème "
+        "(panne, défaut, échec... deux valeurs possibles) et des colonnes de "
+        "mesures. L'app entraîne un nouveau modèle sur **ce fichier précis** "
+        "— aucune connaissance préalable du domaine n'est nécessaire, ça "
+        "fonctionne pour l'industrie comme pour l'agroalimentaire, "
+        "l'automobile, la cosmétique, etc."
+    )
+
+    with st.expander("📋 Comment doit être structuré mon fichier ? (à lire avant d'uploader)"):
+        st.markdown("""
+**Trois règles simples à respecter :**
+
+1. **Une ligne = un cas observé** (une machine, un lot de production, un
+   véhicule, un produit... peu importe le domaine)
+2. **Une colonne "résultat"** avec **exactement 2 valeurs possibles**
+   (ex. `Panne` / `OK`, `Défaut` / `Conforme`, `0` / `1`, `Oui` / `Non`).
+   Le nom de la colonne n'a pas d'importance — tu la sélectionnes toi-même
+   dans un menu après l'upload.
+3. **Plusieurs colonnes de mesures** qui pourraient expliquer ce résultat
+   (température, durée, taux, catégorie...). Nombres ou texte acceptés.
+
+**Pour un résultat fiable :**
+- Au moins **50 à 100 lignes** (en dessous, l'app te préviendra que ce
+  n'est pas assez pour être fiable)
+- Le moins possible de cases vides
+- Des mesures qui ont un lien plausible avec le résultat — l'app te donne
+  un score de fiabilité (AUC) après entraînement pour te dire si c'est le
+  cas ou non
+
+**Ce qui bloque l'upload :**
+- Une colonne résultat avec plus ou moins de 2 valeurs (ex. "Faible /
+  Moyen / Élevé" ne marche pas tel quel — il faudrait la simplifier en 2
+  catégories avant l'upload)
+- Moins de 30 lignes exploitables
+
+**Tu as déjà ton propre fichier ? Tu n'as pas besoin des exemples ci-dessous** —
+dépose-le directement dans la zone d'upload plus bas. Si l'app te bloque,
+voici comment corriger les cas les plus fréquents, directement dans Excel :
+
+- **"Ma colonne résultat a plus de 2 valeurs"** (ex. Faible/Moyen/Élevé, ou
+  une note de 0 à 10) → crée une **nouvelle colonne** à côté avec une
+  formule qui simplifie en 2 cas. Exemple dans Excel :
+  `=SI(A2>7;"Problème";"OK")` (remplace `A2` et le seuil `7` par tes
+  valeurs), puis recopie la formule sur toutes les lignes.
+- **"Il y a des cases vides"** → soit tu les remplis avec une valeur
+  raisonnable (moyenne de la colonne, par exemple), soit tu supprimes les
+  lignes concernées si elles ne sont pas trop nombreuses.
+- **"Mes données sont sur plusieurs feuilles Excel"** → l'app ne lit que la
+  **première feuille** du fichier. Copie les données utiles sur la
+  première feuille avant l'upload, ou exporte cette feuille seule en CSV.
+- **"Je ne sais pas quelles colonnes garder"** → garde tout, l'app te laisse
+  choisir après l'upload, et tu peux comparer les résultats en
+  décochant/recochant des colonnes et en relançant l'entraînement.
+
+**Trois exemples ci-dessous, dans des domaines totalement différents, pour tester tout de suite :**
+        """)
+        ex_col1, ex_col2, ex_col3 = st.columns(3)
+        with ex_col1:
+            st.caption("🚗 Automobile — prédiction de panne")
+            st.download_button(
+                "Télécharger l'exemple",
+                EXAMPLE_AUTOMOBILE.to_csv(index=False).encode("utf-8"),
+                file_name="exemple_automobile.csv", mime="text/csv", width="stretch", key="dl_auto",
+            )
+        with ex_col2:
+            st.caption("🥫 Agroalimentaire — défaut qualité")
+            st.download_button(
+                "Télécharger l'exemple",
+                EXAMPLE_AGROALIMENTAIRE.to_csv(index=False).encode("utf-8"),
+                file_name="exemple_agroalimentaire.csv", mime="text/csv", width="stretch", key="dl_agro",
+            )
+        with ex_col3:
+            st.caption("🧴 Cosmétique — non-conformité")
+            st.download_button(
+                "Télécharger l'exemple",
+                EXAMPLE_COSMETIQUE.to_csv(index=False).encode("utf-8"),
+                file_name="exemple_cosmetique.csv", mime="text/csv", width="stretch", key="dl_cosm",
+            )
+
+    generic_file = st.file_uploader(
+        "Fichier de données (CSV ou Excel)", type=["csv", "xlsx", "xls"], key="generic_upload"
+    )
+
+    if generic_file is not None:
+        if generic_file.name.lower().endswith((".xlsx", ".xls")):
+            gdf = pd.read_excel(generic_file)
+        else:
+            gdf = pd.read_csv(generic_file)
+
+        st.caption(f"{len(gdf)} lignes, {len(gdf.columns)} colonnes détectées.")
+        with st.expander("Aperçu des données"):
+            st.dataframe(gdf.head(20), width="stretch")
+
+        target_col = st.selectbox(
+            "Quelle colonne indique le problème à prédire ? (doit avoir exactement 2 valeurs possibles)",
+            options=gdf.columns,
+        )
+
+        valid_target = gdf[target_col].nunique(dropna=True) == 2
+        if not valid_target:
+            st.error(
+                f"La colonne « {target_col} » a {gdf[target_col].nunique(dropna=True)} valeurs "
+                "différentes — il en faut exactement 2 (ex. 0/1, Oui/Non, Panne/OK)."
+            )
+        else:
+            values = gdf[target_col].dropna().value_counts()
+            default_risk_value = values.idxmin()  # la valeur la plus rare = souvent le "problème"
+            risk_value = st.selectbox(
+                "Laquelle de ces deux valeurs représente le problème / la panne ?",
+                options=values.index.tolist(),
+                index=values.index.tolist().index(default_risk_value),
+            )
+
+            feature_options = [c for c in gdf.columns if c != target_col]
+            feature_cols_generic = st.multiselect(
+                "Colonnes à utiliser comme mesures", options=feature_options, default=feature_options
+            )
+
+            train_clicked = st.button("Entraîner un modèle sur ce fichier", type="primary")
+
+            if train_clicked and feature_cols_generic:
+                clean = gdf.dropna(subset=[target_col])
+                y_generic = (clean[target_col] == risk_value).astype(int)
+                X_generic = clean[feature_cols_generic]
+
+                num_cols_g = X_generic.select_dtypes(include=[np.number]).columns.tolist()
+                cat_cols_g = [c for c in feature_cols_generic if c not in num_cols_g]
+
+                if y_generic.nunique() < 2 or len(clean) < 30:
+                    st.error("Pas assez de données ou de diversité pour entraîner un modèle fiable (minimum ~30 lignes avec les deux cas).")
+                else:
+                    preprocess_g = ColumnTransformer(
+                        [("cat", OneHotEncoder(handle_unknown="ignore"), cat_cols_g)],
+                        remainder="passthrough", verbose_feature_names_out=False,
+                    )
+                    model_g = Pipeline([
+                        ("preprocess", preprocess_g),
+                        ("clf", RandomForestClassifier(n_estimators=300, max_depth=8, class_weight="balanced", random_state=42)),
+                    ])
+
+                    stratify_g = y_generic if y_generic.value_counts().min() >= 2 else None
+                    Xtr, Xte, ytr, yte = train_test_split(
+                        X_generic, y_generic, test_size=0.2, random_state=42, stratify=stratify_g
+                    )
+                    model_g.fit(Xtr, ytr)
+                    proba_test = model_g.predict_proba(Xte)[:, 1]
+                    auc = roc_auc_score(yte, proba_test) if yte.nunique() == 2 else float("nan")
+
+                    st.session_state["generic_model"] = model_g
+                    st.session_state["generic_features"] = feature_cols_generic
+                    st.session_state["generic_num_cols"] = num_cols_g
+                    st.session_state["generic_cat_cols"] = cat_cols_g
+                    st.session_state["generic_auc"] = auc
+                    st.session_state["generic_data"] = clean
+                    st.session_state["generic_target"] = target_col
+                    st.session_state["generic_risk_value"] = risk_value
+
+            if "generic_model" in st.session_state and st.session_state.get("generic_target") == target_col:
+                model_g = st.session_state["generic_model"]
+                clean = st.session_state["generic_data"]
+                feats = st.session_state["generic_features"]
+                auc = st.session_state["generic_auc"]
+
+                st.success(f"Modèle entraîné — AUC-ROC sur données de test : {auc:.3f}" if auc == auc else "Modèle entraîné.")
+                if auc == auc and auc < 0.65:
+                    st.warning(
+                        "AUC assez faible (< 0.65) : les colonnes sélectionnées expliquent peu le "
+                        "problème dans ce fichier. Les résultats ci-dessous restent indicatifs."
+                    )
+
+                proba_all = model_g.predict_proba(clean[feats])[:, 1]
+
+                n_high = int((proba_all >= 0.70).sum())
+                n_mid = int(((proba_all >= 0.30) & (proba_all < 0.70)).sum())
+                n_low = int((proba_all < 0.30).sum())
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Risque élevé", n_high)
+                c2.metric("Risque modéré", n_mid)
+                c3.metric("Risque faible", n_low)
+
+                order_g = proba_all.argsort()[::-1]
+                MAX_CARDS_G = 25
+                label_g = f"Lignes — triées par risque décroissant"
+                if len(order_g) > MAX_CARDS_G:
+                    label_g += f" (top {MAX_CARDS_G} sur {len(order_g)})"
+                st.markdown(f'<div class="mp-panel-header">{label_g}</div>', unsafe_allow_html=True)
+
+                display_cols = feats[:4]
+                for i in order_g[:MAX_CARDS_G]:
+                    row = clean.iloc[i]
+                    p = proba_all[i]
+                    zone, zlabel = risk_zone(p)
+                    readings_html = "".join(
+                        f'<span>{c} <b>{row[c]}</b></span>' for c in display_cols
+                    )
+                    st.markdown(f"""
+                    <div class="mp-card">
+                        <div class="mp-card-top">
+                            <div class="mp-machine-id">
+                                <span class="mp-readings">{readings_html}</span>
+                            </div>
+                            <span class="mp-status-badge mp-status-{zone}">{zlabel}</span>
+                        </div>
+                        <div class="mp-gauge-row">
+                            <div class="mp-gauge-track">
+                                <div class="mp-gauge-zone" style="left:0%; width:30%; background:rgba(29,140,130,0.30);"></div>
+                                <div class="mp-gauge-zone" style="left:30%; width:40%; background:rgba(196,121,14,0.30);"></div>
+                                <div class="mp-gauge-zone" style="left:70%; width:30%; background:rgba(198,64,47,0.30);"></div>
+                                <div class="mp-gauge-marker" style="left:{p*100:.1f}%;"></div>
+                            </div>
+                            <div class="mp-gauge-value">{p*100:.1f}%</div>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                st.markdown('<div class="mp-panel-header">Facteurs déterminants</div>', unsafe_allow_html=True)
+                st.caption("Quelles colonnes pèsent le plus dans les décisions de ce modèle (entraîné uniquement sur ce fichier).")
+                clf_g = model_g.named_steps["clf"]
+                names_g = model_g.named_steps["preprocess"].get_feature_names_out()
+                imp_g = pd.DataFrame({"variable": names_g, "importance": clf_g.feature_importances_})
+
+                def origin_col(name):
+                    for c in st.session_state["generic_cat_cols"]:
+                        if name.startswith(c + "_"):
+                            return c
+                    return name
+
+                imp_g["colonne"] = imp_g["variable"].apply(origin_col)
+                imp_g = imp_g.groupby("colonne", as_index=False)["importance"].sum().sort_values("importance", ascending=True)
+
+                fig_g, ax_g = plt.subplots(figsize=(7, 3.2))
+                ax_g.barh(imp_g["colonne"], imp_g["importance"], color=CYAN, height=0.55)
+                ax_g.set_xlabel("Importance relative dans le modèle")
+                style_dark_axes(ax_g, fig_g)
+                fig_g.tight_layout()
+                st.pyplot(fig_g)
+
+                with st.expander(f"Voir le tableau complet ({len(clean)} lignes)"):
+                    out_g = clean.copy()
+                    out_g["probabilité"] = (proba_all * 100).round(1)
+                    out_g["niveau_risque"] = [risk_zone(p)[1] for p in proba_all]
+                    st.dataframe(out_g.iloc[order_g], width="stretch")
+                    st.download_button(
+                        "Télécharger les résultats (CSV)",
+                        out_g.to_csv(index=False).encode("utf-8"),
+                        file_name="resultats_mode_generique.csv",
+                        mime="text/csv",
+                    )
+    else:
+        st.info("En attente d'un fichier — l'app entraînera un modèle spécifiquement sur tes données, quel que soit le domaine.")
