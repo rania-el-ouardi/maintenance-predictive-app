@@ -1,0 +1,10 @@
+# Données tierces téléchargées séparément (voir README) — jamais commitées
+data/ai4i2020.csv
+
+# Artefacts régénérables — pas besoin de les versionner
+__pycache__/
+*.pyc
+
+# Fichiers système
+.DS_Store
+Thumbs.db
