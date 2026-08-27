@@ -21,10 +21,6 @@ monospace — pas un thème de tableau de bord générique. Chaque machine
 analysée s'affiche comme une carte-instrument avec une jauge de risque à
 trois zones (faible / modéré / critique) plutôt qu'un simple tableau.
 
-## Aperçu
-
-![capture d'écran à ajouter](docs/screenshot.png)
-
 ## Fonctionnement
 
 1. L'utilisateur dépose un fichier CSV de relevés capteurs récents
